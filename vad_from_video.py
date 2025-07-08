@@ -144,8 +144,51 @@ def plot_3d(csv_path, out_path='plot.png'):
     plt.savefig(out_path)
     plt.close()
 
+def plot_3d_animation(csv_path, out_path='vad_trajectory.gif'):
+    import matplotlib.animation as animation
+    df = pd.read_csv(csv_path)
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_xlabel('Valence')
+    ax.set_ylabel('Arousal')
+    ax.set_zlabel('Dominance')
+    ax.set_xlim(df['V'].min(), df['V'].max())
+    ax.set_ylim(df['A'].min(), df['A'].max())
+    ax.set_zlim(df['D'].min(), df['D'].max())
+    line, = ax.plot([], [], [], 'b-', label='V-A-D trajectory')
+    point, = ax.plot([], [], [], 'ro')
+    
+    def init():
+        line.set_data([], [])
+        line.set_3d_properties([])
+        point.set_data([], [])
+        point.set_3d_properties([])
+        return line, point
+    
+    def update(frame):
+        x = df['V'][:frame+1]
+        y = df['A'][:frame+1]
+        z = df['D'][:frame+1]
+        line.set_data(x, y)
+        line.set_3d_properties(z)
+        point.set_data([x.iloc[-1]], [y.iloc[-1]])
+        point.set_3d_properties([z.iloc[-1]])
+        return line, point
+    
+    ani = animation.FuncAnimation(fig, update, frames=len(df), init_func=init, blit=True, interval=50)
+    ani.save(out_path, writer='pillow', fps=20)
+    plt.close()
+
 # 6. Main pipeline
 def main(args):
+    # 输出文件夹
+    output_dir = 'outputs'
+    os.makedirs(output_dir, exist_ok=True)
+    # 根据输入视频名生成前缀
+    video_basename = os.path.splitext(os.path.basename(args.input))[0]
+    csv_path = os.path.join(output_dir, f'results_{video_basename}.csv')
+    png_path = os.path.join(output_dir, f'plot_{video_basename}.png')
+    gif_path = os.path.join(output_dir, f'vad_trajectory_{video_basename}.gif')
     # 先统计采样帧数用于 tqdm
     cap = cv2.VideoCapture(args.input)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -166,9 +209,10 @@ def main(args):
     df = pd.DataFrame(results)
     for col in ['V', 'A', 'D']:
         df[f'{col}_smooth'] = smooth_series(df[col], alpha=args.smooth)
-    df.to_csv('results.csv', index=False)
-    plot_3d('results.csv')
-    print('Done. Results saved to results.csv and plot.png')
+    df.to_csv(csv_path, index=False)
+    plot_3d(csv_path, out_path=png_path)
+    plot_3d_animation(csv_path, out_path=gif_path)
+    print(f'Done. Results saved to {csv_path}, {png_path} and {gif_path}')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Framewise V-A-D extractor from video')
