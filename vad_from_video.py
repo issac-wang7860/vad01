@@ -9,6 +9,8 @@ import torch.nn as nn
 import torchvision.transforms as transforms
 import mediapipe as mp
 import cv2
+import tempfile
+from utils.stream_or_download import get_local_or_stream
 
 # ========== EmoNet 相关 =============
 class EmoNetWrapper:
@@ -183,6 +185,13 @@ def plot_3d_animation(csv_path, out_gif_path='vad_trajectory.gif', out_mp4_path=
     plt.close()
 
 # 6. Main pipeline
+try:
+    from vad_multimodal import extract_audio, extract_audio_features, extract_body_bbox, load_mlp, estimate_D_mod, backup_estimate_D
+    MULTIMODAL_OK = True
+except ImportError:
+    MULTIMODAL_OK = False
+    print('[Warning] vad_multimodal not available, fallback to legacy D.')
+
 def main(args):
     # 输出文件夹，按视频名和模式分子文件夹
     video_basename = os.path.splitext(os.path.basename(args.input))[0]
@@ -206,10 +215,43 @@ def main(args):
     results = []
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     emonet = EmoNetWrapper(device=device)
-    for timestamp, frame in tqdm(extract_frames(args.input, args.fps), total=num_samples, desc='Processing frames', unit='frame'):
+    # 多模态Dominance准备
+    if MULTIMODAL_OK:
+        # 1. 提取音频特征
+        wav_path = os.path.join(output_dir, f'{video_basename}.wav')
+        extract_audio(args.input, wav_path)
+        pitch_z, loud_z = extract_audio_features(wav_path, fps=args.fps)
+        # 2. 加载MLP
+        mlp = load_mlp(weights_path=os.path.join('vad_multimodal','weights','mlp_d.pth'), device=device)
+    else:
+        pitch_z, loud_z, mlp = None, None, None
+    for idx, (timestamp, frame) in enumerate(tqdm(extract_frames(args.input, args.fps), total=num_samples, desc='Processing frames', unit='frame')):
         valence, arousal = emonet.predict(frame)
         D = estimate_D(valence, arousal)
-        results.append({'timestamp': timestamp, 'V': valence, 'A': arousal, 'D': D})
+        # 多模态Dominance
+        if MULTIMODAL_OK:
+            # 音频特征
+            pz = pitch_z[idx] if pitch_z is not None and idx < len(pitch_z) else np.nan
+            lz = loud_z[idx] if loud_z is not None and idx < len(loud_z) else np.nan
+            # 人体bbox
+            try:
+                bbox_norm = extract_body_bbox(frame, frame.shape)
+            except Exception:
+                bbox_norm = np.nan
+            features = [valence, arousal, pz, lz, bbox_norm]
+            if all(np.isnan(f) for f in features[2:]):
+                D_mod = np.nan
+                D_final = D
+            else:
+                try:
+                    D_mod = estimate_D_mod(features, mlp, device=device)
+                except Exception:
+                    D_mod = np.nan
+                D_final = D_mod if not np.isnan(D_mod) else D
+        else:
+            D_mod = np.nan
+            D_final = D
+        results.append({'timestamp': timestamp, 'V': valence, 'A': arousal, 'D': D, 'D_mod': D_mod, 'D_final': D_final})
     df = pd.DataFrame(results)
     for col in ['V', 'A', 'D']:
         df[f'{col}_smooth'] = smooth_series(df[col], alpha=args.smooth)
@@ -218,11 +260,54 @@ def main(args):
     plot_3d_animation(csv_path, out_gif_path=gif_path, out_mp4_path=mp4_path)
     print(f'Done. Results saved to {csv_path}, {png_path}, {gif_path} and {mp4_path}')
 
+    # 自动生成3D交互HTML和快捷方式
+    import subprocess, sys
+    viewer_py = os.path.join(os.path.dirname(__file__), 'vad_viewer.py')
+    if os.path.exists(viewer_py):
+        subprocess.run([
+            sys.executable, viewer_py,
+            '--csv', csv_path,
+            '--port', '0',  # 0端口只生成文件不启动服务
+            '--export'
+        ], check=False)
+    else:
+        print('Warning: vad_viewer.py not found, skip 3D HTML export.')
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Framewise V-A-D extractor from video')
-    parser.add_argument('--input', type=str, required=True, help='Input video file (.mp4/.mov)')
+    parser.add_argument('--input', type=str, help='Input video file (.mp4/.mov)')
+    parser.add_argument('--url', type=str, help='Input video url (tiktok/douyin/HLS)')
+    parser.add_argument('--prefer_stream', action='store_true', help='Prefer streaming mode if available')
     parser.add_argument('--fps', type=int, default=5, help='Frames per second to sample')
     parser.add_argument('--smooth', type=float, default=0.3, help='Exponential smoothing alpha')
     parser.add_argument('--mode', choices=['accurate', 'fast'], default='accurate', help='accurate = highest precision; fast = precision/speed trade-off')
     args = parser.parse_args()
+    # 处理url或本地文件
+    if args.url:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source = get_local_or_stream(args.url, tmp_dir, args.prefer_stream)
+            if isinstance(source, dict):
+                # 流式处理
+                def process_stream(stream_url, fps):
+                    import cv2
+                    cap = cv2.VideoCapture(stream_url, cv2.CAP_FFMPEG)
+                    if not cap.isOpened():
+                        raise IOError(f"Cannot open stream: {stream_url}")
+                    video_fps = cap.get(cv2.CAP_PROP_FPS) or fps
+                    step = int(round(video_fps / fps))
+                    frame_idx = 0
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        if frame_idx % step == 0:
+                            timestamp = frame_idx / video_fps
+                            yield (timestamp, frame)
+                        frame_idx += 1
+                    cap.release()
+                # 用process_stream替换extract_frames
+                extract_frames = lambda path, fps: process_stream(source['stream'], source['fps'])
+                args.input = source['stream']
+            else:
+                args.input = source
     main(args) 
