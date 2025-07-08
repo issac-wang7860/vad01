@@ -8,4 +8,5 @@ pandas
 matplotlib
 tqdm
 pytest
-requests 
+requests
+# 说明：如需生成mp4/gif动画，需将ffmpeg添加到系统环境变量PATH 
