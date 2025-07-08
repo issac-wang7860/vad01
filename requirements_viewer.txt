@@ -1,0 +1,7 @@
+pandas
+numpy
+scipy
+plotly>=5.20
+dash==2.*
+pillow
+dash-extensions 

@@ -1,7 +1,7 @@
 torch
 torchvision==0.*
 torchaudio
-mediapipe
+mediapipe>=0.10
 opencv-python
 ffmpeg-python
 pandas
@@ -9,4 +9,7 @@ matplotlib
 tqdm
 pytest
 requests
+librosa>=0.10
+yt-dlp>=2025.4.0
+filelock
 # 说明：如需生成mp4/gif动画，需将ffmpeg添加到系统环境变量PATH 
